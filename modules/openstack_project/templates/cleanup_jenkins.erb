@@ -1,0 +1,70 @@
+#!/bin/bash
+
+echo "Cleaning the server ..."
+echo
+
+echo "Check if periodic cleanup has been disabled on this slave"
+if [ ! -f /tmp/disable-periodic-cleanup.txt ]; then
+    echo "Proceed with cleanup"
+else
+    echo "Aborting cleanup"
+    exit 0
+fi
+
+echo 'Waiting for node to be idle'
+echo
+while ! curl -s -k -X POST https://jenkins.openswitch.net/computer/<%=slave%>/api/xml | grep -q '<idle>true</idle>'; do
+    sleep 10;
+done
+
+echo "Node is now idle, setting it offline..."
+echo
+curl -s -X POST -u gerrig:<%=token%> https://jenkins.openswitch.net/computer/<%=slave%>/toggleOffline?offlineMessage="Performing%20daily%20maintenance"
+
+echo 'Waiting for node to be idle again (just in case)'
+echo
+while ! curl -s -k -X POST https://jenkins.openswitch.net/computer/<%=slave%>/api/xml | grep -q '<idle>true</idle>'; do
+    sleep 5;
+done
+
+echo 'The node is idle now. Cleaning up the Jenkins Workspace'
+echo
+find /mnt/jenkins/workspace/ -maxdepth 1 ! -name 'workspace' -type d -exec rm -Rf {} +
+
+echo 'The node is idle now. Cleaning up docker'
+containers=$(sudo docker ps -aq)
+if [ -z $containers ]
+then
+  echo "No docker containers to be deleted"
+else
+  sudo docker stop --time=5 $containers
+  sudo docker rm -f $containers
+fi
+images=$(sudo docker images -f "dangling=true" -q)
+if [ -z $images ]
+then
+  echo "No dangling docker images"
+else
+  sudo docker rmi -f $images
+fi
+images=$(sudo docker images | grep '^ops.*' | awk '{print $1}')
+if [ -z $images ]
+then
+  echo "No ops images to be deleted"
+else
+  sudo docker rmi -f $images
+fi
+echo "After docker cleanup"
+sudo docker ps -a
+sudo docker images
+sudo service docker restart
+
+echo "Setting the node back online.."
+# We are seeing that nodes are not being picked up by zuul after they were toogle offline
+# as a workaround we will disconnect the node and reconnect it
+# Jenkins has an REST API for disconnection, but connection will happen on demand when we fetch the status
+curl -s -X POST -u gerrig:<%=token%> https://jenkins.openswitch.net/computer/<%=slave%>/doDisconnect?offlineMessage="Performing%20daily%20maintenance"
+curl -s -X POST -u gerrig:<%=token%> https://jenkins.openswitch.net/computer/<%=slave%>/toggleOffline
+curl -s https://jenkins.openswitch.net/computer/<%=slave%>/api/json > /dev/null
+
+echo "Cleanup completed"
